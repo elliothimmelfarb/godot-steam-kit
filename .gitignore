@@ -1,0 +1,10 @@
+.godot/
+**/steam/build/
+**/steam/output/
+override.cfg
+*.tmp
+.DS_Store
+Thumbs.db
+.env
+.env.*
+node_modules/

@@ -1,0 +1,11 @@
+{
+  "name": "godot-steam-kit",
+  "version": "0.1.0",
+  "description": "A CLI and agent skills that take a Godot 4 project to a Steam beta branch.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "bin": { "steam-kit": "steam-kit.mjs" },
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test" }
+}

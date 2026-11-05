@@ -1,0 +1,17 @@
+# Godot text files stay LF on Windows too, or every save becomes a diff.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.glb binary
+*.ttf binary
+*.otf binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.zip binary
