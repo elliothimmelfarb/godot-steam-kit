@@ -10,7 +10,7 @@ steam-kit upload <game> --preview  # logs and manifest only, uploads nothing
 steam-kit upload <game>            # uploads, sets live on steam.json "betaBranch" (staging)
 ```
 
-The kit writes `steam/output/scripts/app_build_<appId>.vdf` and one `depot_build_<depotId>.vdf` per OS, then runs `steamcmd +login $STEAM_BUILD_ACCOUNT +run_app_build ... +quit`.
+The kit writes `steam/output/scripts/app_build_<appId>.vdf` and one `depot_build_<depotId>.vdf` per OS, then runs `steamcmd +@NoPromptForPassword 1 +login $STEAM_BUILD_ACCOUNT +run_app_build ... +quit`. The flag makes steamcmd fail instead of asking for a password. It has not been tried against a real upload.
 
 ## Rules
 

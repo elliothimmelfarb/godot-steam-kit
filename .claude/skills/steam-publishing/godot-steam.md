@@ -2,7 +2,7 @@
 
 ## GodotSteam
 
-`steam-kit init` installs the newest GodotSteam GDExtension from Codeberg (`codeberg.org/godotsteam/godotsteam`, tags ending `-gde`) into `addons/godotsteam`. It works with the stock Godot editor and templates; no custom build. The version is not pinned, so a later release can differ from what the kit was tested with (4.23.2).
+`steam-kit init` installs the GodotSteam GDExtension pinned in `versions.json` from Codeberg (`codeberg.org/godotsteam/godotsteam`, tags ending `-gde`) into `addons/godotsteam`, and refuses a file that does not match the pinned SHA-256. It works with the stock Godot editor and templates; no custom build. To move to a newer release, update the tag, file name and hash together, then rerun `init` on a test project.
 
 - **Packaging bug, 4.23.2 (2026-10-20):** its `.gdextension` names `osx/libgodotsteam.macos.template_*.dylib`, but the files ship as `*.universal.dylib`. The macOS export then fails to load the extension. `init` repairs the paths (`repairGdextension` in `lib.mjs`). Drop this note when a release fixes it.
 - Export copies the GodotSteam library and `steam_api64.dll` / `libsteam_api.so` / `libsteam_api.dylib` next to the executable automatically. Verified 2026-11-05 for all three.

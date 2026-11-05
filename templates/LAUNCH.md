@@ -2,6 +2,8 @@
 
 Phases from the `steam-publishing` skill, `runbook.md`. Tick with a date when done. Commit after each change.
 
+**If this repo is public, everything in this file is public, including prices and dates.** Keep anything unannounced somewhere private until it is announced.
+
 | | |
 |---|---|
 | App ID | |

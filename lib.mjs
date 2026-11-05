@@ -1,5 +1,6 @@
 // Pure helpers for steam-kit: image sizes, the store-asset rules, and SteamPipe VDFs.
 // Sizes from partner.steamgames.com/doc/store/assets (checked 2026-10-30).
+import { createHash } from "node:crypto";
 
 export function imageSize(buf) {
   if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) {
@@ -75,12 +76,63 @@ export function checkAssets(files) {
   return { errors, ok };
 }
 
-const q = (s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+const ESCAPES = { "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t" };
+// VDF and Godot config strings share these escapes. A raw quote or newline would
+// end the string and let a value write its own keys.
+const escapeString = (s) => String(s).replace(/[\\"\n\r\t]/g, (c) => ESCAPES[c]);
+const q = (s) => `"${escapeString(s)}"`;
+
+const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const isBranch = (s) => typeof s === "string" && BRANCH.test(s);
+export const isDefaultBranch = (s) => String(s).toLowerCase() === "default";
+
+// Steam app and depot ids are unsigned 32-bit integers.
+const isSteamId = (v) => Number.isInteger(v) && v > 0 && v <= 0xffffffff;
+const PLATFORM_KEYS = ["windows", "linux", "macos"];
+
+// steam.json values reach GDScript, export presets, file paths and VDFs. This is the
+// one gate in front of all of them. It returns readable lines, empty when valid.
+// name is free text, so it is escaped where it is written rather than restricted.
+export function validateSteamConfig(cfg) {
+  if (typeof cfg !== "object" || cfg === null || Array.isArray(cfg)) return ["steam.json must be a JSON object"];
+  const errors = [];
+  const { name, appId, depots, exe, bundleId, betaBranch } = cfg;
+  if (typeof name !== "string" || !name.trim()) errors.push("name must be a non-empty string");
+  if (!isSteamId(appId)) errors.push("appId must be a positive integer");
+  if (typeof depots !== "object" || depots === null || Array.isArray(depots)) errors.push("depots must be an object of platform to depot id");
+  else {
+    for (const [p, id] of Object.entries(depots)) {
+      if (!PLATFORM_KEYS.includes(p)) errors.push(`depots has unknown platform ${JSON.stringify(p)}, want ${PLATFORM_KEYS.join(", ")}`);
+      else if (id !== null && !isSteamId(id)) errors.push(`depots.${p} must be a positive integer or null`);
+    }
+  }
+  if (typeof exe !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(exe)) errors.push("exe must be letters, digits, _ and - only, 64 at most, with no extension");
+  if (typeof bundleId !== "string" || !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(bundleId)) errors.push("bundleId must look like com.example.game");
+  if (!isBranch(betaBranch)) errors.push("betaBranch must be letters, digits, ., _ and - only, 64 at most, starting with a letter or digit");
+  return errors;
+}
+
+// Fill the export preset template. One pass, so a value is never expanded again.
+export function renderPresets(template, { exe, name, bundleId }) {
+  const values = { EXE: exe, NAME: escapeString(name), BUNDLE_ID: bundleId };
+  return template.replace(/\{\{(EXE|NAME|BUNDLE_ID)\}\}/g, (_, key) => values[key]);
+}
+
+export const checksum = (buf, algorithm) => createHash(algorithm).update(buf).digest("hex");
+
+// The hash listed for exactly this file in a release's SHA512-SUMS.txt, or null.
+export function sha512For(sums, file) {
+  for (const line of sums.split("\n")) {
+    const m = line.trim().match(/^([0-9a-fA-F]{128})\s+\*?(.+)$/);
+    if (m && m[2] === file) return m[1].toLowerCase();
+  }
+  return null;
+}
 
 // depots: { platform: depotId }. setLive names a beta branch; the default branch
 // cannot be set live from steamcmd, so "default" is dropped here on purpose.
 export function appBuildVdf({ appId, desc = "", depots, setLive = "", preview = false, buildOutput = "../output" }) {
-  const live = setLive === "default" ? "" : setLive;
+  const live = isDefaultBranch(setLive) ? "" : setLive;
   const lines = Object.values(depots).map((id) => `\t\t${q(id)} ${q(`depot_build_${id}.vdf`)}`);
   return `"AppBuild"
 {

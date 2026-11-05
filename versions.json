@@ -1,1 +1,8 @@
-{ "godot": "4.7.2" }
+{
+  "godot": "4.7.2",
+  "godotsteam": {
+    "tag": "v4.23.2-gde",
+    "asset": "godotsteam-4.23.2-gdextension-plugin-4.4.zip",
+    "sha256": "0c935ac86bdb881a71009a0352140a043812c438745979e1b246416a9282e414"
+  }
+}

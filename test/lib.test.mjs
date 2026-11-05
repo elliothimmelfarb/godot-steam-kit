@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { imageSize, checkAssets, appBuildVdf, depotVdf, repairGdextension, setProjectSetting, findAddon, setBundleId } from "../lib.mjs";
+import { imageSize, checkAssets, appBuildVdf, depotVdf, repairGdextension, setProjectSetting, findAddon, setBundleId, sha512For, checksum, validateSteamConfig, isBranch, isDefaultBranch, renderPresets } from "../lib.mjs";
 
 // A 1x1 PNG with its width/height patched, so the header is all that is read.
 function png(w, h) {
@@ -92,4 +92,69 @@ test("finds the addon folder inside an unpacked GodotSteam release", () => {
 test("setBundleId rewrites the macOS preset and leaves other lines alone", () => {
   const cfg = 'application/name="X"\napplication/bundle_identifier="com.example.x"\ncodesign/codesign=1\n';
   assert.equal(setBundleId(cfg, "com.studio.x"), 'application/name="X"\napplication/bundle_identifier="com.studio.x"\ncodesign/codesign=1\n');
+});
+
+test("app build VDF treats any casing of default as the default branch", () => {
+  for (const b of ["default", "Default", "DEFAULT"]) {
+    assert.equal(isDefaultBranch(b), true);
+    assert.match(appBuildVdf({ appId: 1, depots: {}, setLive: b }), /"SetLive" ""/);
+  }
+  assert.match(appBuildVdf({ appId: 1, depots: {}, setLive: "Staging" }), /"SetLive" "Staging"/);
+});
+
+test("a VDF string cannot be broken out of with quotes or newlines", () => {
+  const vdf = appBuildVdf({ appId: 1, depots: {}, desc: 'x"\n\t"SetLive" "default\r\nend' });
+  const line = vdf.split("\n").find((l) => l.includes('"Desc"'));
+  assert.equal(line, String.raw`	"Desc" "x\"\n\t\"SetLive\" \"default\r\nend"`);
+  assert.equal(vdf.split("\n").filter((l) => l.startsWith('\t"SetLive"')).length, 1);
+});
+
+test("finds the exact file in a SHA512-SUMS.txt", () => {
+  const a = "a".repeat(128), b = "b".repeat(128);
+  const sums = `${a}  Godot_v4.7.2-stable_win64.exe\n${b}  Godot_v4.7.2-stable_win64.exe.zip\n`;
+  assert.equal(sha512For(sums, "Godot_v4.7.2-stable_win64.exe.zip"), b);
+  assert.equal(sha512For(sums, "win64.exe.zip"), null);
+  assert.equal(sha512For("not a sums file", "Godot_v4.7.2-stable_win64.exe.zip"), null);
+});
+
+test("checksum is the hex digest the release files publish", () => {
+  assert.equal(checksum(Buffer.from("abc"), "sha256"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+});
+
+const goodConfig = { name: "Demo", appId: 999999, depots: { windows: 1000000, linux: null }, exe: "Demo_Game-2", bundleId: "com.example.demo-game", betaBranch: "staging" };
+
+test("accepts a real config, including the placeholder one init writes", () => {
+  assert.deepEqual(validateSteamConfig(goodConfig), []);
+  assert.deepEqual(validateSteamConfig({ ...goodConfig, name: 'Say "Hi"\\', appId: 480, depots: { windows: null, linux: null, macos: null } }), []);
+});
+
+test("rejects every steam.json value that could reach a script, a path or a VDF unescaped", () => {
+  const bad = [
+    ["appId", "480"], ["appId", "1\nOS.shell_open('x')"], ["appId", 1.5], ["appId", 0], ["appId", -1], ["appId", 2 ** 32],
+    ["depots", null], ["depots", []], ["depots", { windows: "12" }], ["depots", { windows: 1.5 }], ["depots", { "../..": 12 }],
+    ["exe", ""], ["exe", "../evil"], ["exe", "a/b"], ["exe", "a b"], ["exe", "a\n"], ["exe", 12],
+    ["bundleId", "nodots"], ["bundleId", 'com.example.x"\nevil="1'], ["bundleId", "com..x"], ["bundleId", "com.example.x\n"],
+    ["betaBranch", ""], ["betaBranch", "-x"], ["betaBranch", 'a"b'], ["betaBranch", "a b"], ["betaBranch", "a\n"],
+    ["name", ""], ["name", 12],
+  ];
+  for (const [key, value] of bad) {
+    const errors = validateSteamConfig({ ...goodConfig, [key]: value });
+    assert.ok(errors.some((e) => e.startsWith(key)), `${key} = ${JSON.stringify(value)}`);
+  }
+  assert.ok(validateSteamConfig(null).length > 0);
+});
+
+test("branch names are strict because --live takes them straight from the command line", () => {
+  assert.equal(isBranch("staging"), true);
+  assert.equal(isBranch("v1.2-beta_3"), true);
+  for (const b of ["", "--preview", 'a"b', "a\nb", "a/b", "x".repeat(65)]) assert.equal(isBranch(b), false, b);
+});
+
+test("presets escape the name and do not expand replacement patterns in it", () => {
+  const tpl = 'path="b/{{EXE}}.exe"\nname="{{NAME}}"\nid="{{BUNDLE_ID}}"\n';
+  const out = renderPresets(tpl, { exe: "Demo", name: 'A "B" \\ $& {{BUNDLE_ID}}\nC', bundleId: "com.example.x" });
+  assert.equal(out, String.raw`path="b/Demo.exe"
+name="A \"B\" \\ $& {{BUNDLE_ID}}\nC"
+id="com.example.x"
+`);
 });

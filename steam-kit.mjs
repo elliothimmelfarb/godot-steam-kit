@@ -2,7 +2,7 @@
 // steam-kit: take a Godot 4 game from a project folder to a build on a Steam branch.
 //   setup                  install the pinned Godot, its export templates and steamcmd (macOS or Windows)
 //   doctor                 check godot, export templates, steamcmd, cached build login
-//   init <game>            add steam/steam.json, GodotSteam, the bootstrap autoload, export presets
+//   init <game>            add steam/steam.json, the pinned GodotSteam, the bootstrap autoload, export presets
 //   export <game> [os..]   headless release exports into <game>/steam/build/<os>
 //   shots <game> [--seconds 20] [--every 4] [-- game args]   1920x1080 frames from a real run
 //   assets <game>          check <game>/steam/store-assets against Steam's sizes
@@ -12,10 +12,10 @@ import path from "node:path";
 import os from "node:os";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { checkAssets, appBuildVdf, depotVdf, repairGdextension, setProjectSetting, findAddon, setBundleId } from "./lib.mjs";
+import { checkAssets, appBuildVdf, depotVdf, repairGdextension, setProjectSetting, findAddon, setBundleId, sha512For, checksum, validateSteamConfig, isBranch, isDefaultBranch, renderPresets } from "./lib.mjs";
 
 const KIT = path.dirname(fileURLToPath(import.meta.url));
-const { godot: GODOT_VERSION } = JSON.parse(fs.readFileSync(path.join(KIT, "versions.json"), "utf8"));
+const { godot: GODOT_VERSION, godotsteam: GODOTSTEAM } = JSON.parse(fs.readFileSync(path.join(KIT, "versions.json"), "utf8"));
 const WIN = process.platform === "win32";
 const MAC = process.platform === "darwin";
 // Tools live per user in a folder of their own, so setup never touches a Godot you already have.
@@ -33,7 +33,7 @@ const STEAM_CONFIG = MAC
   ? path.join(os.homedir(), "Library/Application Support/Steam/config/config.vdf")
   : path.join(path.dirname(STEAMCMD), "config/config.vdf");
 const PLATFORMS = { windows: "Windows Desktop", linux: "Linux", macos: "macOS" };
-const GODOTSTEAM_RELEASES = "https://codeberg.org/api/v1/repos/godotsteam/godotsteam/releases?limit=20";
+const GODOTSTEAM_DOWNLOADS = "https://codeberg.org/godotsteam/godotsteam/releases/download";
 
 const die = (msg) => { console.error(`steam-kit: ${msg}`); process.exit(1); };
 const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
@@ -45,15 +45,23 @@ function gameDir(arg) {
   return dir;
 }
 
+function readConfig(p) {
+  const cfg = readJson(p);
+  const errors = validateSteamConfig(cfg);
+  if (errors.length) die(`steam/steam.json is not valid:\n  ${errors.join("\n  ")}`);
+  return cfg;
+}
+
 function config(dir) {
   const p = path.join(dir, "steam/steam.json");
   if (!fs.existsSync(p)) die(`no steam/steam.json, run: steam-kit init ${dir}`);
-  return readJson(p);
+  return readConfig(p);
 }
 
 function projectName(dir) {
   const m = fs.readFileSync(path.join(dir, "project.godot"), "utf8").match(/^config\/name="(.*)"$/m);
-  return m ? m[1] : path.basename(dir);
+  // project.godot stores the name escaped.
+  return m ? m[1].replace(/\\(["\\])/g, "$1") : path.basename(dir);
 }
 
 function godotVersion() {
@@ -80,33 +88,39 @@ function doctor() {
 async function installGodotSteam(dir) {
   const dest = path.join(dir, "addons/godotsteam");
   if (fs.existsSync(dest)) return console.log("GodotSteam already in addons/godotsteam");
-  const list = await fetch(GODOTSTEAM_RELEASES);
-  if (!list.ok) die(`could not list GodotSteam releases: ${list.status}`);
-  const releases = await list.json();
-  const rel = releases.find((r) => r.tag_name.endsWith("-gde") && r.assets.some((a) => a.name.endsWith(".zip")));
-  if (!rel) die("no GodotSteam GDExtension release found on Codeberg");
-  const asset = rel.assets.find((a) => a.name.endsWith(".zip"));
+  const { tag, asset, sha256 } = GODOTSTEAM;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "godotsteam-"));
-  const zip = path.join(tmp, asset.name);
-  await download(asset.browser_download_url, zip);
+  const zip = path.join(tmp, asset);
+  await download(`${GODOTSTEAM_DOWNLOADS}/${tag}/${asset}`, zip, { algorithm: "sha256", hex: sha256 });
   const unpacked = path.join(tmp, "x");
   unpack(zip, unpacked);
   const subdirs = (d) => fs.readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   const found = findAddon(unpacked, subdirs, path.join);
-  if (!found) die(`unexpected layout in ${asset.name}`);
+  if (!found) die(`unexpected layout in ${asset}`);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.cpSync(found, dest, { recursive: true });
   const gde = path.join(dest, "godotsteam.gdextension");
   const before = fs.readFileSync(gde, "utf8");
   const after = repairGdextension(before, gde, dir, (p) => fs.existsSync(p));
   if (after !== before) { fs.writeFileSync(gde, after); console.log("repaired library paths in godotsteam.gdextension"); }
-  console.log(`installed GodotSteam ${rel.tag_name} into addons/godotsteam`);
+  console.log(`installed GodotSteam ${tag} into addons/godotsteam`);
 }
 
-async function download(url, file) {
+async function get(url) {
   const res = await fetch(url);
   if (!res.ok) die(`download failed ${res.status}: ${url}`);
-  fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+  return res;
+}
+
+// expected is { algorithm, hex }, checked before the file reaches disk. Only steamcmd
+// passes null, because Valve publishes no hash for it.
+async function download(url, file, expected) {
+  const buf = Buffer.from(await (await get(url)).arrayBuffer());
+  if (expected) {
+    const got = checksum(buf, expected.algorithm);
+    if (got !== expected.hex) die(`checksum mismatch for ${url}\n  expected ${expected.hex}\n  got      ${got}\nA cut-off download also does this, so try once more. If it repeats, do not use the file.`);
+  }
+  fs.writeFileSync(file, buf);
 }
 
 // bsdtar unpacks zip and tar on macOS and Windows 10+. GNU tar on Linux cannot read a zip.
@@ -120,16 +134,23 @@ async function setup() {
   if (!WIN && !MAC) die("setup knows macOS and Windows; install Godot and steamcmd by hand here");
   const gh = `https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable`;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "steam-kit-"));
+  let sums;
+  const fetchGodotFile = async (name, file) => {
+    sums ??= await (await get(`${gh}/SHA512-SUMS.txt`)).text();
+    const hex = sha512For(sums, name);
+    if (!hex) die(`${name} is not listed in the release's SHA512-SUMS.txt`);
+    await download(`${gh}/${name}`, file, { algorithm: "sha512", hex });
+  };
   let have = "";
   try { have = godotVersion(); } catch {}
   if (!have.startsWith(GODOT_VERSION)) {
     console.log(`installing Godot ${GODOT_VERSION}`);
     const zip = path.join(tmp, "godot.zip");
     if (WIN) {
-      await download(`${gh}/Godot_v${GODOT_VERSION}-stable_win64.exe.zip`, zip);
+      await fetchGodotFile(`Godot_v${GODOT_VERSION}-stable_win64.exe.zip`, zip);
       unpack(zip, path.dirname(GODOT));
     } else {
-      await download(`${gh}/Godot_v${GODOT_VERSION}-stable_macos.universal.zip`, zip);
+      await fetchGodotFile(`Godot_v${GODOT_VERSION}-stable_macos.universal.zip`, zip);
       const home = path.join(TOOLS, `godot-${GODOT_VERSION}`);
       fs.rmSync(home, { recursive: true, force: true });
       unpack(zip, home);
@@ -138,15 +159,15 @@ async function setup() {
   if (!fs.existsSync(path.join(TEMPLATES, "windows_release_x86_64.exe"))) {
     console.log("installing export templates (about 1 GB)");
     const tpz = path.join(tmp, "templates.tpz");
-    await download(`${gh}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz`, tpz);
+    await fetchGodotFile(`Godot_v${GODOT_VERSION}-stable_export_templates.tpz`, tpz);
     unpack(tpz, path.join(tmp, "t"));
     fs.mkdirSync(TEMPLATES, { recursive: true });
     fs.cpSync(path.join(tmp, "t/templates"), TEMPLATES, { recursive: true });
   }
   if (!fs.existsSync(STEAMCMD)) {
-    console.log("installing steamcmd");
+    console.log("installing steamcmd (not checksum verified, Valve publishes no hash for it)");
     const a = path.join(tmp, WIN ? "steamcmd.zip" : "steamcmd.tar.gz");
-    await download(`https://steamcdn-a.akamaihd.net/client/installer/${WIN ? "steamcmd.zip" : "steamcmd_osx.tar.gz"}`, a);
+    await download(`https://steamcdn-a.akamaihd.net/client/installer/${WIN ? "steamcmd.zip" : "steamcmd_osx.tar.gz"}`, a, null);
     unpack(a, path.dirname(STEAMCMD));
     // First run updates steamcmd itself.
     spawnSync(STEAMCMD, ["+quit"], { stdio: "inherit" });
@@ -175,15 +196,15 @@ async function init(dir) {
       name,
       appId: 480,
       depots: { windows: null, linux: null, macos: null },
-      exe: name.replace(/[^A-Za-z0-9]+/g, ""),
-      bundleId: `com.example.${slug(name)}`,
+      exe: name.replace(/[^A-Za-z0-9]+/g, "").slice(0, 64) || "Game",
+      bundleId: `com.example.${slug(name) || "game"}`,
       betaBranch: "staging",
     }, null, 2) + "\n");
     console.log("wrote steam/steam.json (appId 480 is Valve's test app; set your own appId, depots and bundleId before uploading)");
   }
   const launch = path.join(dir, "steam/LAUNCH.md");
   if (!fs.existsSync(launch)) fs.copyFileSync(path.join(KIT, "templates/LAUNCH.md"), launch);
-  const cfg = readJson(cfgPath);
+  const cfg = readConfig(cfgPath);
   await installGodotSteam(dir);
   fs.mkdirSync(path.join(dir, "addons/steam_kit"), { recursive: true });
   fs.copyFileSync(path.join(KIT, "godot/steam_bootstrap.gd"), path.join(dir, "addons/steam_kit/steam_bootstrap.gd"));
@@ -193,8 +214,7 @@ async function init(dir) {
   fs.writeFileSync(pg, setProjectSetting(fs.readFileSync(pg, "utf8"), "rendering", "textures/vram_compression/import_etc2_astc", "true"));
   const presets = path.join(dir, "export_presets.cfg");
   if (!fs.existsSync(presets)) {
-    fs.writeFileSync(presets, fs.readFileSync(path.join(KIT, "godot/export_presets.cfg"), "utf8")
-      .replaceAll("{{EXE}}", cfg.exe).replaceAll("{{NAME}}", cfg.name).replaceAll("{{BUNDLE_ID}}", cfg.bundleId));
+    fs.writeFileSync(presets, renderPresets(fs.readFileSync(path.join(KIT, "godot/export_presets.cfg"), "utf8"), cfg));
     console.log("wrote export_presets.cfg (Windows, Linux, macOS)");
   } else console.log("export_presets.cfg exists, left alone: it needs presets named " + Object.values(PLATFORMS).join(", "));
   const gi = path.join(dir, ".gitignore");
@@ -288,6 +308,7 @@ function upload(dir, args) {
   const li = args.indexOf("--live");
   if (li >= 0 && !args[li + 1]) die("--live needs a branch name");
   const live = li >= 0 ? args[li + 1] : cfg.betaBranch;
+  if (!isBranch(live)) die(`${JSON.stringify(live)} is not a valid branch name`);
   if (cfg.appId === 480) die("steam.json still has the test appId 480");
   const depots = Object.fromEntries(Object.entries(cfg.depots).filter(([, id]) => id));
   if (!Object.keys(depots).length) die("steam.json has no depot ids");
@@ -297,6 +318,7 @@ function upload(dir, args) {
   }
   const acct = process.env.STEAM_BUILD_ACCOUNT || die("STEAM_BUILD_ACCOUNT is unset");
   // Without a cached login steamcmd asks for a password, which an agent must never type.
+  // So check first, and tell steamcmd below to fail rather than prompt if the check was wrong.
   const cached = fs.existsSync(STEAM_CONFIG) && fs.readFileSync(STEAM_CONFIG, "utf8").toLowerCase().includes(`"${acct.toLowerCase()}"`);
   if (!cached) die(`no cached steamcmd login for ${acct}. A person runs this once, in a terminal: ${STEAMCMD} +login ${acct} +quit`);
   const scripts = path.join(dir, "steam/output/scripts");
@@ -310,8 +332,8 @@ function upload(dir, args) {
     fs.writeFileSync(path.join(scripts, `depot_build_${id}.vdf`), depotVdf({ depotId: id, contentRoot: path.join(dir, "steam/build", p) }));
   }
   // steamcmd cannot set the default branch live, so appBuildVdf drops it. Say so.
-  console.log(`${preview ? "preview" : "upload"} ${desc} -> ${preview || live === "default" ? "no branch" : `branch "${live}"`}`);
-  const r = spawnSync(STEAMCMD, ["+login", acct, "+run_app_build", path.join(scripts, `app_build_${cfg.appId}.vdf`), "+quit"], { stdio: "inherit" });
+  console.log(`${preview ? "preview" : "upload"} ${desc} -> ${preview || isDefaultBranch(live) ? "no branch" : `branch "${live}"`}`);
+  const r = spawnSync(STEAMCMD, ["+@NoPromptForPassword", "1", "+login", acct, "+run_app_build", path.join(scripts, `app_build_${cfg.appId}.vdf`), "+quit"], { stdio: "inherit" });
   process.exit(r.status ?? 1);
 }
 
